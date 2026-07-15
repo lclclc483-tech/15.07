@@ -105,6 +105,15 @@ def post_city_kb() -> ReplyKeyboardMarkup:
     ], resize_keyboard=True)
 
 
+def create_post_city_kb() -> ReplyKeyboardMarkup:
+    # Клавиатура для ввода города публикации объявления.
+    # Кнопка "Все города" здесь намеренно не показывается —
+    # у конкретного объявления должен быть конкретный город.
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text=BTN_BACK)]
+    ], resize_keyboard=True)
+
+
 def text_input_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text=BTN_BACK_TO_SPECS)]
@@ -198,13 +207,8 @@ def specialties_kb(action: str, ptype: str, cat_idx: int, page: int = 0):
     return kb.as_markup()
 
 
-def browse_kb(has_prev: bool, has_more: bool, action: str, ptype: str, cat_idx: int, spec_idx: int, post_id: int,
-              author_id: int, username: str):
+def browse_kb(has_prev: bool, has_more: bool, action: str, ptype: str, cat_idx: int, spec_idx: int, post_id: int):
     kb = InlineKeyboardBuilder()
-    if username:
-        kb.button(text="✉️ Написать автору", url=f"t.me/{username}")
-    else:
-        kb.button(text="✉️ Написать автору", url=f"tg://user?id={author_id}")
     if has_prev: kb.button(text="⬅️ Предыдущее", callback_data="bprev")
     if has_more: kb.button(text="➡️ Следующее", callback_data="bnext")
     kb.button(text="🔔 Подписаться на новые", callback_data=f"sub|{cat_idx}|{spec_idx}")
@@ -212,7 +216,7 @@ def browse_kb(has_prev: bool, has_more: bool, action: str, ptype: str, cat_idx: 
     kb.button(text="🚩 Пожаловаться", callback_data=f"report|{post_id}")
     kb.button(text="⬅️ К списку специальностей", callback_data=f"cat|{action}|{ptype}|{cat_idx}")
     kb.button(text="🏠 В меню", callback_data="menu")
-    kb.adjust(1, 2, 1, 2, 1, 1)
+    kb.adjust(2, 1, 2, 1, 1)
     return kb.as_markup()
 
 
@@ -260,7 +264,6 @@ async def notify_subscribers(bot: Bot, ptype: str, city: str, category: str, spe
 
 
 def format_post(row) -> str:
-    author = f"@{row.get('username')}" if row.get('username') else "Скрыт (Используйте кнопку связи)"
     category = row.get('category', 'Без категории')
     specialty = row.get('specialty', 'Без специальности')
     city = row.get('city', 'Все города')
@@ -271,8 +274,7 @@ def format_post(row) -> str:
         f"Специальность: <b>{specialty}</b>\n"
         f"Город: {city}\n"
         f"Тип: {ptype_str}\n\n"
-        f"{text}\n\n"
-        f"Автор: {author}"
+        f"{text}"
     )
 
 
@@ -425,7 +427,11 @@ async def process_post_city(message: Message, state: FSMContext):
         await state.set_state(Form.waiting_post_text)
         await state.update_data(city=city_to_save, **{k: v for k, v in state_data.items() if k.startswith("post_")})
         await message.answer(
-            f"Город: {city_to_save}\n\nВведите текст объявления:",
+            f"Город: {city_to_save}\n\n"
+            f"Введите текст объявления.\n\n"
+            f"❗️Не забудьте указать в тексте способ связи с вами "
+            f"(телефон, @username или иной контакт) — иначе с вами "
+            f"не смогут связаться, так как автор в объявлении не отображается.",
             reply_markup=text_input_kb()
         )
     elif pending_action and pending_ptype:
@@ -605,7 +611,7 @@ async def cb_specialty(callback: CallbackQuery, state: FSMContext):
         )
         await callback.message.answer(
             "📍 Введите город вакансии/резюме:",
-            reply_markup=post_city_kb()
+            reply_markup=create_post_city_kb()
         )
         return
     city = db.get_city(callback.from_user.id)
@@ -619,7 +625,7 @@ async def cb_specialty(callback: CallbackQuery, state: FSMContext):
     post = rows[0]
     await callback.message.edit_text(format_post(post),
                                      reply_markup=browse_kb(False, len(rows) > 1, action, ptype, cat_idx, spec_idx,
-                                                            post["id"], post["user_id"], post["username"]))
+                                                            post["id"]))
 
 
 @router.callback_query(F.data.startswith("sub|"))
@@ -653,8 +659,7 @@ async def _advance(callback: CallbackQuery, state: FSMContext, step: int):
     await callback.message.edit_text(format_post(post),
                                      reply_markup=browse_kb(pos > 0, pos + 1 < len(ids), state_data["browse_action"],
                                                             state_data["browse_ptype"], state_data["browse_cat_idx"],
-                                                            state_data["browse_spec_idx"], post["id"], post["user_id"],
-                                                            post["username"]))
+                                                            state_data["browse_spec_idx"], post["id"]))
 
 
 @router.callback_query(F.data.startswith("hide|"))
