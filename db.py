@@ -8,7 +8,6 @@ log = logging.getLogger("bot_logger")
 
 
 def normalize_city(city_name: str) -> str:
-    """Приводит название города к единому стандарту: Москва, Санкт-петербург и т.д."""
     if not city_name or city_name == "Все города" or city_name == "🌍 Все города":
         return "Все города"
     return " ".join(city_name.strip().split()).capitalize()
@@ -18,7 +17,6 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # Таблица пользователей
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -28,7 +26,6 @@ def init_db():
         )
     """)
 
-    # АВТО-МИГРАЦИЯ USERS: Проверяем, существует ли колонка is_blocked
     try:
         cursor.execute("SELECT is_blocked FROM users LIMIT 1")
     except sqlite3.OperationalError:
@@ -36,7 +33,6 @@ def init_db():
         cursor.execute("ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0")
         conn.commit()
 
-    # Таблица объявлений со сроком жизни (включает active)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS posts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,7 +49,6 @@ def init_db():
         )
     """)
 
-    # АВТО-МИГРАЦИЯ POSTS: Проверяем, существует ли колонка active
     try:
         cursor.execute("SELECT active FROM posts LIMIT 1")
     except sqlite3.OperationalError:
@@ -61,7 +56,14 @@ def init_db():
         cursor.execute("ALTER TABLE posts ADD COLUMN active INTEGER DEFAULT 1")
         conn.commit()
 
-    # Скрытые объявления
+    # Безопасное добавление колонки expires_at для существующих баз данных
+    try:
+        cursor.execute("SELECT expires_at FROM posts LIMIT 1")
+    except sqlite3.OperationalError:
+        log.info("[БАЗА ДАННЫХ] Колонка expires_at не найдена. Добавление...")
+        cursor.execute("ALTER TABLE posts ADD COLUMN expires_at TEXT")
+        conn.commit()
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS hidden_posts (
             user_id INTEGER,
@@ -70,14 +72,30 @@ def init_db():
         )
     """)
 
-    # Таблица подписок на уведомления
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS subscriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             city TEXT,
             category TEXT,
-            specialty TEXT
+            specialty TEXT,
+            ptype TEXT
+        )
+    """)
+
+    # Безопасное обновление старой базы данных: добавляем колонку ptype, если ее нет
+    try:
+        cursor.execute("SELECT ptype FROM subscriptions LIMIT 1")
+    except sqlite3.OperationalError:
+        log.info("[БАЗА ДАННЫХ] Колонка ptype не найдена в subscriptions. Добавление...")
+        cursor.execute("ALTER TABLE subscriptions ADD COLUMN ptype TEXT DEFAULT 'vacancy'")
+        conn.commit()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS profiles (
+            user_id INTEGER PRIMARY KEY,
+            name TEXT UNIQUE COLLATE NOCASE,
+            description TEXT
         )
     """)
 
@@ -266,19 +284,19 @@ def add_subscription(user_id: int, city: str, category: str, specialty: str, pty
     norm_city = normalize_city(city)
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO subscriptions (user_id, city, category, specialty) VALUES (?, ?, ?, ?)",
-                   (user_id, norm_city, category, specialty))
+    cursor.execute("INSERT INTO subscriptions (user_id, city, category, specialty, ptype) VALUES (?, ?, ?, ?, ?)",
+                   (user_id, norm_city, category, specialty, ptype))
     conn.commit()
     conn.close()
 
 
-def get_matching_subscriptions(city: str, category: str, specialty: str):
+def get_matching_subscriptions(city: str, category: str, specialty: str, ptype: str = "vacancy"):
     norm_city = normalize_city(city)
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT DISTINCT user_id FROM subscriptions WHERE (city = ? OR city = 'Все города') AND category = ? AND specialty = ?",
-        (norm_city, category, specialty))
+        "SELECT DISTINCT user_id FROM subscriptions WHERE (city = ? OR city = 'Все города') AND category = ? AND specialty = ? AND ptype = ?",
+        (norm_city, category, specialty, ptype))
     rows = cursor.fetchall()
     conn.close()
     return [r[0] for r in rows]
@@ -289,8 +307,8 @@ def get_user_subscriptions(user_id: int, city: str, ptype: str):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT category, specialty FROM subscriptions WHERE user_id = ? AND (city = ? OR city = 'Все города')",
-        (user_id, norm_city)
+        "SELECT category, specialty FROM subscriptions WHERE user_id = ? AND (city = ? OR city = 'Все города') AND ptype = ?",
+        (user_id, norm_city, ptype)
     )
     rows = cursor.fetchall()
     conn.close()
@@ -302,8 +320,8 @@ def remove_subscription(user_id: int, city: str, category: str, specialty: str, 
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute(
-        "DELETE FROM subscriptions WHERE user_id = ? AND (city = ? OR city = 'Все города') AND category = ? AND specialty = ?",
-        (user_id, norm_city, category, specialty)
+        "DELETE FROM subscriptions WHERE user_id = ? AND (city = ? OR city = 'Все города') AND category = ? AND specialty = ? AND ptype = ?",
+        (user_id, norm_city, category, specialty, ptype)
     )
     conn.commit()
     conn.close()
@@ -323,3 +341,68 @@ def get_stats():
     b = cursor.fetchone()[0]
     conn.close()
     return {"users": u, "vacancies": v, "resumes": r, "blocked": b}
+
+
+# --- ФУНКЦИИ ПРОФИЛЯ ---
+
+def get_profile(user_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM profiles WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_profile_by_name(name: str):
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM profiles WHERE name = ?", (name,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def is_name_taken(name: str, exclude_user_id: int) -> bool:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM profiles WHERE name = ? AND user_id != ?", (name, exclude_user_id))
+    row = cursor.fetchone()
+    conn.close()
+    return bool(row)
+
+
+def upsert_profile(user_id: int, name: str, description: str):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO profiles (user_id, name, description) VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET name = excluded.name, description = excluded.description
+    """, (user_id, name, description))
+    conn.commit()
+    conn.close()
+
+
+def update_profile_field(user_id: int, field: str, value: str):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    if field == "name":
+        cursor.execute("UPDATE profiles SET name = ? WHERE user_id = ?", (value, user_id))
+    elif field == "description":
+        cursor.execute("UPDATE profiles SET description = ? WHERE user_id = ?", (value, user_id))
+    conn.commit()
+    conn.close()
+
+
+def get_user_all_active_posts(user_id: int):
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    now_str = datetime.now().isoformat()
+    cursor.execute("SELECT * FROM posts WHERE user_id = ? AND active = 1 AND expires_at > ? ORDER BY id DESC",
+                   (user_id, now_str))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
